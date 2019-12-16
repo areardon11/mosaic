@@ -7,6 +7,9 @@ import skimage.io as skio
 import skimage.transform as transform
 import sys
 import math
+from scipy.signal import convolve2d
+
+plt.rcParams['image.cmap'] = 'gray'
 
 ###########################################
 # Constants
@@ -19,6 +22,8 @@ _mosaic_image = os.path.join(_images_dir, "mosaic_image.jpg")
 
 # tuning variables
 _mosaic_image_scale_factor = 5  # Affects total pixel count of final creation.
+_composition_processing_scale_factor = 1./_mosaic_image_scale_factor # Only used when determining composition, should scale inversely
+_alpha_combining_factor = .6
 
 # script creations
 _metadata_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/code/metadata/")
@@ -144,32 +149,98 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file):
   composition_length = int(math.sqrt(num_im))
   mosaic_im = plt.imread(mosaic_file)
   mosaic_cropped = crop_to_square(mosaic_im)
-  # Apply scale factor to mosaic image
-  mosaic_cropped = transform.rescale(mosaic_cropped, _mosaic_image_scale_factor)
   if not mosaic_cropped.shape[0]%composition_length == 0:
     margin = (mosaic_cropped.shape[0]%composition_length)//2
     mod = (mosaic_cropped.shape[0]%composition_length)%2
     mosaic_cropped = crop_margin(mosaic_cropped, margin, margin+mod)
+  # Apply scale factor to mosaic image
+  mosaic_cropped = transform.rescale(mosaic_cropped, _mosaic_image_scale_factor)
   if mosaic_cropped.shape[0]/composition_length > min_dim:
     print("Error!!! Not expected to have a mosaic image this large in comparison to the composition images")
     return
+  test_im(mosaic_cropped)
   plt.imsave(mosaic_resized_file, mosaic_cropped)
 
   # Resize the composition_images
   # TODO: parallelize
   sidelength = mosaic_cropped.shape[0]/composition_length
-  counter = 0
-  for f in map(lambda x: os.path.join(input_dir, x), os.listdir(input_dir)):
-    if not os.path.isfile(f) or not has_whitelisted_extension(f):
-      print("\nIgnoring: "+str(f))
-      continue
-    counter += 1
-    im = plt.imread(f)
+  for x in range(1,num_im+1):
+    im = plt.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))
     resized = transform.resize(im, (sidelength,sidelength,3))
-    write_image_to_file(resized, output_dir, counter)
-    print_update("Finished resizing "+str(counter)+" image(s).")
+    write_image_to_file(resized, output_dir, x)
+    print_update("Finished resizing "+str(x)+" image(s).")
   print_update_end()
 
+###########################################
+# Determine Mosaic Composition
+###########################################
+
+def gaussian2d(shape=(5,5), sigma=.8):
+  m,n = [(ss-1.)/2. for ss in shape]
+  x,y = np.ogrid[-m:m+1,-n:n+1]
+  f = np.exp(-((x**2 + y**2)/(2.0*sigma**2)))
+  return f/f.sum()
+
+def evaluation_function(im1,im2):
+  # TODO: Use a more in depth evaluation than SSD
+  return np.sum((im1-im2)**2)
+
+def featurize(im, comp_len):
+  return np.hstack(np.vsplit(im, comp_len))
+
+def defeaturize(im, comp_len):
+  return np.vstack(np.hsplit(im, comp_len))
+
+def arrange_composition_photos(mosaic_file, input_dir, output_composition_file):
+  num_im = read_int_from_file(os.path.join(_metadata_dir, _num_images_filename))
+  composition_length = int(math.sqrt(num_im))
+  mosaic_im = skio.imread(mosaic_file)/255.
+
+  # Returns a list of indices in the order that they should be greedily applied to the composition
+  def determine_greedy_index_order():
+    # Convert mosaic to greyscale for blurring and edge detection (dowsized for ease)
+    grey = np.mean(mosaic_im, axis=2)
+    small = transform.resize(grey, (255,255))
+    small_smoothed = convolve2d(small, gaussian2d(), "same")
+    high_freq = transform.resize(small-small_smoothed, grey.shape)*255.
+    # returns the index-sorted inverse of the sum of high_freq values per composition image
+    return np.argsort(map(lambda x: 1./np.sum(x), np.hsplit(featurize(high_freq, composition_length), composition_length**2)))
+
+  def determine_greedy_comp_photo_order():
+    # resizes mosaic image and featurizes
+    featurized_mosaic_im = featurize(transform.rescale(mosaic_im, _composition_processing_scale_factor), composition_length)
+    sl = featurized_mosaic_im.shape[0]
+    # loads resized composition images to memory
+    composition_images = {}
+    for x in range(1,num_im+1):
+      im = skio.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))/255.
+      composition_images[x] = transform.resize(im, (sl,sl,3))
+
+    # determines which composition image corresponds to each part of the mosaic image 
+    comp_order = np.zeros(num_im)
+    for i in determine_greedy_index_order():
+      mosaic_slice = featurized_mosaic_im[:,sl*i:sl*(i+1)]
+      d = {k: evaluation_function(mosaic_slice,v) for k, v in composition_images.iteritems()}
+      best_comp_im = min(d,key=d.get)
+      comp_order[i] = best_comp_im
+      del composition_images[best_comp_im]
+    return comp_order
+
+  order = determine_greedy_comp_photo_order()
+  combined = np.hstack(map(lambda x: skio.imread(os.path.join(input_dir,"image_"+str(int(x)).zfill(4)+".jpg"))/255., order))
+  plt.imsave(output_composition_file, defeaturize(combined, composition_length))
+
+###########################################
+# Combining
+###########################################
+
+def combine_images(im1, im2, alpha=_alpha_combining_factor):
+  return np.clip((im1*alpha)+(im2*(1-alpha)),0,1)
+
+def combine_mosaic(mosaic_file, input_composition_file, output_file):
+  mosaic_im = combine_images(skio.imread(mosaic_file)/255., skio.imread(input_composition_file)/255.)
+  test_im(mosaic_im)
+  plt.imsave(output_file, mosaic_im)
 
 
 ###########################################
@@ -190,14 +261,12 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   # Step 1: Resize images
   resized_mosaic_file = os.path.splitext(mosaic_image)[0]+"_resized.jpg"
   do_step(resize_all, start_step, _cropped, _resized, mosaic_image, resized_mosaic_file)
-
-def get_sample_im():
-  return plt.imread(os.path.join(_images_dir, _input_full, "IMG_20180923_135334.jpg"))
-  
-def test():
-  print(read_int_from_file(os.path.join(_metadata_dir, _num_images_filename)))
+  # Step 2: Arrange composition photos
+  arranged_file = os.path.splitext(mosaic_image)[0]+"_arranged.jpg"
+  do_step(arrange_composition_photos, start_step, resized_mosaic_file, _resized, arranged_file)
+  # Step 3: Combine mosaic and composition photos
+  do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
 
 if __name__ == "__main__":
-  create_mosaic(start_step=1)
-  # test()
+  create_mosaic(start_step=2)
 

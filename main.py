@@ -16,21 +16,21 @@ plt.rcParams['image.cmap'] = 'gray'
 ###########################################
 
 # input defaults
-_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/relationship/")
-_input_images = os.path.join(_images_dir, "input_full")
+_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/wildlife/")
+_input_images = os.path.join(_images_dir, "input/")
 _mosaic_image = os.path.join(_images_dir, "mosaic_image.jpg")
 
 # tuning variables
-_mosaic_image_scale_factor = 5  # Affects total pixel count of final creation.
+_mosaic_image_scale_factor = 1  # Affects total pixel count of final creation.
 _composition_processing_scale_factor = 1./_mosaic_image_scale_factor # Only used when determining composition, should scale inversely
-_alpha_combining_factor = .6
+_alpha_combining_factor = .5
 
 # script creations
 _metadata_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/code/metadata/")
 _min_dim_filename = "min_dimension"
 _num_images_filename = "num_images"
 _whitelisted_extensions = (".jpg", ".png")
-_cropped = os.path.join(_images_dir, "cropped2")
+_cropped = os.path.join(_images_dir, "cropped")
 _resized = os.path.join(_images_dir, "resized")
 
 #mutable global variables
@@ -94,10 +94,10 @@ def crop_to_square(image):
     if im.shape[0] < im.shape[1]:
       print("Screwed the pooch on dimensions. Try transposing.")
       return
-    num_col_remove = im.shape[0]-im.shape[1]
-    if not num_col_remove%2==0:
-      im = im[:,:-1]
-    crop_size = num_col_remove/2
+    num_row_remove = im.shape[0]-im.shape[1]
+    if not num_row_remove%2==0:
+      im = im[:-1,:]
+    crop_size = num_row_remove/2
     return im[crop_size:im.shape[0]-crop_size]
 
   if image.shape[0] == image.shape[1]:
@@ -140,13 +140,13 @@ def crop_composition_images(input_dir, output_dir):
 ###########################################
 
 # Assumes all input images are cropped to squares
-def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file):
+def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_size=(15,15)):
   ensure_dir(output_dir)
   min_dim = read_int_from_file(os.path.join(_metadata_dir, _min_dim_filename))
   num_im = read_int_from_file(os.path.join(_metadata_dir, _num_images_filename))
 
   # Resize the mosaic image so that the composition images fit evenly by pixels
-  composition_length = int(math.sqrt(num_im))
+  composition_length = comp_size[0]
   mosaic_im = plt.imread(mosaic_file)
   mosaic_cropped = crop_to_square(mosaic_im)
   if not mosaic_cropped.shape[0]%composition_length == 0:
@@ -158,7 +158,6 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file):
   if mosaic_cropped.shape[0]/composition_length > min_dim:
     print("Error!!! Not expected to have a mosaic image this large in comparison to the composition images")
     return
-  test_im(mosaic_cropped)
   plt.imsave(mosaic_resized_file, mosaic_cropped)
 
   # Resize the composition_images
@@ -191,9 +190,9 @@ def featurize(im, comp_len):
 def defeaturize(im, comp_len):
   return np.vstack(np.hsplit(im, comp_len))
 
-def arrange_composition_photos(mosaic_file, input_dir, output_composition_file):
+def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, comp_size=(15,15)):
   num_im = read_int_from_file(os.path.join(_metadata_dir, _num_images_filename))
-  composition_length = int(math.sqrt(num_im))
+  composition_length = comp_size[0]
   mosaic_im = skio.imread(mosaic_file)/255.
 
   # Returns a list of indices in the order that they should be greedily applied to the composition
@@ -217,7 +216,7 @@ def arrange_composition_photos(mosaic_file, input_dir, output_composition_file):
       composition_images[x] = transform.resize(im, (sl,sl,3))
 
     # determines which composition image corresponds to each part of the mosaic image 
-    comp_order = np.zeros(num_im)
+    comp_order = np.zeros(comp_size[0]*comp_size[1])
     for i in determine_greedy_index_order():
       mosaic_slice = featurized_mosaic_im[:,sl*i:sl*(i+1)]
       d = {k: evaluation_function(mosaic_slice,v) for k, v in composition_images.iteritems()}
@@ -268,5 +267,5 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
 
 if __name__ == "__main__":
-  create_mosaic(start_step=2)
+  create_mosaic(start_step=1)
 

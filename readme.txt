@@ -12,7 +12,6 @@ Activate the virtual environment:
 Install the required packages in the virtualenv using pip:
 	pip install -r requirements.txt
 
-
 ************************************************
 Setup Images and Code
 ************************************************

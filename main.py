@@ -20,8 +20,15 @@ _images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosa
 _input_images = os.path.join(_images_dir, "input/")
 _mosaic_image = os.path.join(_images_dir, "mosaic_image.jpg")
 
-# tuning variables
+# Necesary starting at step 1
 _mosaic_image_scale_factor = 3.  # Affects total pixel count of final creation.
+
+
+
+# Necessary starting at step 2
+_comp_size = (24, 24)  # Tuple containing the number of composition images, width by height
+
+
 _alpha_combining_factor = .5
 
 ###########################################
@@ -29,9 +36,8 @@ _alpha_combining_factor = .5
 ###########################################
 
 _composition_processing_scale_factor = 1./_mosaic_image_scale_factor # Only used when determining composition (scales inversely to speed processing)
-_metadata_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/code/metadata/")
-_min_dim_filename = "min_dimension"
-_num_images_filename = "num_images"
+_min_dim_filepath = os.path.join(_images_dir, ".min_dimension") # Smallest sidelength of composition photo
+_num_images_filepath = os.path.join(_images_dir, ".num_images") # Total number of composition images
 _whitelisted_extensions = (".jpg", ".png")
 _cropped = os.path.join(_images_dir, "cropped")
 _resized = os.path.join(_images_dir, "resized")
@@ -118,7 +124,6 @@ def crop_margin(image, margin1, margin2):
 
 def crop_composition_images(input_dir, output_dir):
   ensure_dir(output_dir)
-  ensure_dir(_metadata_dir)
   counter = 0
   total_min_dimension = float("inf")
   # TODO: Parallelize this cropping
@@ -137,8 +142,8 @@ def crop_composition_images(input_dir, output_dir):
     total_min_dimension = min(total_min_dimension, cropped_im.shape[0])
     write_image_to_file(cropped_im, output_dir, counter)
     print_update("Finished cropping "+str(counter)+" image(s).")
-  write_string_to_file(str(total_min_dimension), os.path.join(_metadata_dir, _min_dim_filename))
-  write_string_to_file(str(counter), os.path.join(_metadata_dir, _num_images_filename))
+  write_string_to_file(str(total_min_dimension), _min_dim_filepath)
+  write_string_to_file(str(counter), _num_images_filepath)
   print_update_end()
 
 ###########################################
@@ -146,10 +151,10 @@ def crop_composition_images(input_dir, output_dir):
 ###########################################
 
 # Assumes all input images are cropped to squares
-def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_size=(24,24)):
+def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_size):
   ensure_dir(output_dir)
-  min_dim = read_int_from_file(os.path.join(_metadata_dir, _min_dim_filename))
-  num_im = read_int_from_file(os.path.join(_metadata_dir, _num_images_filename))
+  min_dim = read_int_from_file(_min_dim_filepath)
+  num_im = read_int_from_file(_num_images_filepath)
 
   # Resize the mosaic image so that the composition images fit evenly by pixels
   composition_length = comp_size[0]
@@ -162,7 +167,7 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
   # Apply scale factor to mosaic image
   mosaic_cropped = transform.rescale(mosaic_cropped, _mosaic_image_scale_factor)
   if mosaic_cropped.shape[0]/composition_length > min_dim:
-    print("Error!!! Not expected to have a mosaic image this large in comparison to the composition images")
+    raise("Error!!! Not expected to have a mosaic image this large in comparison to the composition images")
     return
   plt.imsave(mosaic_resized_file, mosaic_cropped)
 
@@ -196,8 +201,8 @@ def featurize(im, comp_len):
 def defeaturize(im, comp_len):
   return np.vstack(np.hsplit(im, comp_len))
 
-def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, comp_size=(24,24)):
-  num_im = read_int_from_file(os.path.join(_metadata_dir, _num_images_filename))
+def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, comp_size):
+  num_im = read_int_from_file(_num_images_filepath)
   comp_width = comp_size[0]
   comp_height = comp_size[1]
   mosaic_im = skio.imread(mosaic_file)/255.
@@ -226,14 +231,16 @@ def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, 
     comp_order = np.zeros(comp_width*comp_height)
     for i in determine_greedy_index_order():
       mosaic_slice = featurized_mosaic_im[:,sl*i:sl*(i+1)]
-      d = {k: evaluation_function(mosaic_slice,v) for k, v in composition_images.iteritems()}
+      d = {k: evaluation_function(mosaic_slice,v) for k, v in composition_images.items()}
       best_comp_im = min(d,key=d.get)
       comp_order[i] = best_comp_im
       del composition_images[best_comp_im]
     return comp_order
 
   order = determine_greedy_comp_photo_order()
-  combined = np.hstack(map(lambda x: skio.imread(os.path.join(input_dir,"image_"+str(int(x)).zfill(4)+".jpg"))/255., order))
+  print(type(order))
+  print(order.shape)
+  combined = np.hstack(np.array(list(map(lambda x: skio.imread(os.path.join(input_dir,"image_"+str(int(x)).zfill(4)+".jpg"))/255., order))))
   plt.imsave(output_composition_file, defeaturize(combined, comp_width))
 
 ###########################################
@@ -266,10 +273,10 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   do_step(crop_composition_images, start_step, input_images_dir, _cropped)
   # Step 1: Resize images
   resized_mosaic_file = os.path.splitext(mosaic_image)[0]+"_resized.jpg"
-  do_step(resize_all, start_step, _cropped, _resized, mosaic_image, resized_mosaic_file)
+  do_step(resize_all, start_step, _cropped, _resized, mosaic_image, resized_mosaic_file, _comp_size)
   # Step 2: Arrange composition photos
   arranged_file = os.path.splitext(mosaic_image)[0]+"_arranged.jpg"
-  do_step(arrange_composition_photos, start_step, resized_mosaic_file, _resized, arranged_file)
+  do_step(arrange_composition_photos, start_step, resized_mosaic_file, _resized, arranged_file, _comp_size)
   # Step 3: Combine mosaic and composition photos
   do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
 

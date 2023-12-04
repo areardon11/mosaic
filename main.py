@@ -8,6 +8,7 @@ import skimage.transform as transform
 import sys
 import math
 from scipy.signal import convolve2d
+import cv2
 
 plt.rcParams['image.cmap'] = 'gray'
 
@@ -16,20 +17,21 @@ plt.rcParams['image.cmap'] = 'gray'
 ###########################################
 
 # input defaults, necessary for step 0
-_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/family/")
-_input_images = os.path.join(_images_dir, "input/")
-_mosaic_image = os.path.join(_images_dir, "mosaic_image.jpg")
+_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/lauren/")
+_input_images = os.path.join(_images_dir, "input_images/")
+_mosaic_image = os.path.join(_images_dir, "PXL_20220918_170511961.jpg")
+# value to bias toward center cropping, necessary for step 0.
+_center_crop_bias_face = 1.05
+_center_crop_bias_saliency = 1.3
 
 # Necesary starting at step 1
-_mosaic_image_scale_factor = 3  # Affects total pixel count of final creation.
-
-
+_mosaic_image_scale_factor = 2  # Affects total pixel count of final creation.
 
 # Necessary starting at step 2
 # Tuple containing the number of composition images that make up the width by the number of images that create the height
-_comp_size = (24, 24) 
+_comp_size = (20, 20)
 
-
+# Necessary starting at step 3
 _alpha_combining_factor = .5 # Ratio of the final product that should be the mosaic.
 
 ###########################################
@@ -44,6 +46,15 @@ _resized = os.path.join(_images_dir, "resized")
 
 #mutable global variables
 _mutable_step_count = 0
+
+###########################################
+# Model instantiations
+###########################################
+
+_saliency = cv2.saliency.StaticSaliencySpectralResidual_create()
+_saliency_fine = cv2.saliency.StaticSaliencyFineGrained_create()
+_face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+_eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
 ###########################################
 # General utility
@@ -86,41 +97,125 @@ def print_update_end():
 def transpose(im):
   return np.transpose(im, (1, 0, 2))
 
-def test_im(im, save=False):
+def clamp_val(val, range):
+  return max(range[0], min(range[1], val))
+
+def test_im(im, save=''):
   print(im.shape)
   plt.imshow(im)
   plt.show()
   if save:
-    plt.imsave(os.path.join(_images_dir, 'test.jpg'), im)
+    plt.imsave(os.path.join(_images_dir, save+'.jpg'), im)
+  return im
 
 ###########################################
 # Cropping
 ###########################################
 
-def crop_to_square(image):
-  def crop_helper(im):
-    # Assumes that the number of rows is greater than the number of columns
-    if im.shape[0] < im.shape[1]:
-      print("Screwed the pooch on dimensions. Try transposing.")
-      return
-    num_row_remove = im.shape[0]-im.shape[1]
-    if not num_row_remove%2==0:
-      im = im[:-1,:]
-    crop_size = num_row_remove//2
-    return im[crop_size:im.shape[0]-crop_size]
+def center_crop(im):
+  assert im.shape[0] > im.shape[1], "Screwed the pooch on dimensions. Try transposing."
+  num_row_remove = im.shape[0]-im.shape[1]
+  if not num_row_remove%2==0:
+    im = im[:-1,:]
+  crop_size = num_row_remove//2
+  return im[crop_size:im.shape[0]-crop_size]
 
+# Crop out the top.
+def top_crop(im):
+  assert im.shape[0] > im.shape[1], "Screwed the pooch on dimensions. Try transposing."
+  return im[im.shape[0]-im.shape[1]:]
+
+# Crop out the bottom.
+def bot_crop(im):
+  assert im.shape[0] > im.shape[1], "Screwed the pooch on dimensions. Try transposing."
+  return im[:im.shape[1]]
+
+def choose_crop_type_max_saliency(saliency_map):
+  total_saliency = np.sum(saliency_map)
+  score_to_crop_type_dict = {}
+  # test_im(center_crop(image))
+  score_to_crop_type_dict[np.sum(center_crop(saliency_map))*_center_crop_bias_saliency/total_saliency] = center_crop
+  # test_im(top_crop(image))
+  score_to_crop_type_dict[np.sum(top_crop(saliency_map))/total_saliency] = top_crop
+  # test_im(bot_crop(image))
+  score_to_crop_type_dict[np.sum(bot_crop(saliency_map))/total_saliency] = bot_crop
+  print(score_to_crop_type_dict)
+  return score_to_crop_type_dict[max(score_to_crop_type_dict)]
+
+def compute_face_area_within_height_range(faces, height_range, transposed):
+  cropped_face_area = 0
+  for (x, y, w, h) in faces:
+    if transposed:
+      left = clamp_val(x, height_range)
+      right = clamp_val(x+w, height_range)
+      cropped_face_area += (right-left) * h
+    else:
+      top = clamp_val(y, height_range)
+      bottom = clamp_val(y+h, height_range)
+      cropped_face_area += w * (bottom-top)
+  return cropped_face_area
+
+def choose_crop_type_max_face_area(im, faces, transposed):
+  total_face_area = 0
+  for (x, y, w, h) in faces:
+    total_face_area += w * h
+  # Check if center crop is good enough.
+  num_row_remove = (im.shape[0]-im.shape[1])//2
+  crop_height_range = [num_row_remove, im.shape[0]-num_row_remove]
+  if not ((crop_height_range[1]-crop_height_range[0])%2==0):
+    crop_height_range[1] -= 1
+  center_face_area = compute_face_area_within_height_range(faces, crop_height_range, transposed)
+  if center_face_area/total_face_area > 1/_center_crop_bias_face:
+    return center_crop
+  score_to_crop_type_dict = {}
+  score_to_crop_type_dict[center_face_area*_center_crop_bias_face/total_face_area] = center_crop
+  score_to_crop_type_dict[compute_face_area_within_height_range(faces, (im.shape[0]-im.shape[1], im.shape[0]), transposed)/total_face_area] = top_crop
+  score_to_crop_type_dict[compute_face_area_within_height_range(faces, (0, im.shape[1]), transposed)/total_face_area] = bot_crop
+  print(score_to_crop_type_dict)
+  return score_to_crop_type_dict[max(score_to_crop_type_dict)]
+
+def crop_to_square(image):
   if image.shape[0] == image.shape[1]:
     return image
+  # Detect faces.
+  gray_im = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+  faces = _face_cascade.detectMultiScale(gray_im, 1.05, 11, minSize=(250,250))
+  # If no faces compute saliency to use instead.
+  success = False
+  saliency_map = None
+  if len(faces) == 0:
+    (success, saliency_map) = _saliency.computeSaliency(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    assert success
+  # Transpose if necessary so we always crop a portrait orientation image.
   transposed = False
-  min_dim_ind = np.argmin(image.shape[:2])
-  if min_dim_ind == 0:
+  if np.argmin(image.shape[:2]) == 0:
     transposed = True
     image = transpose(image)
-  cropped_im = crop_helper(image)
+    if success:
+      saliency_map = np.transpose(saliency_map)
+  # Choose which of the three crop functions to use to either maximize face area or saliency.
+  crop_func = center_crop
+  if len(faces) > 0:
+    crop_func = choose_crop_type_max_face_area(image, faces, transposed)
+  else:
+    crop_func = choose_crop_type_max_saliency(saliency_map)
+  cropped_im = crop_func(image)
   if transposed:
     cropped_im = transpose(cropped_im)
+  """
+  # Shows images that don't use center crop to help with debugging.
+  if(crop_func != center_crop):
+    print(crop_func)
+    for (x, y, w, h) in faces:
+      cv2.rectangle(gray_im, (x, y), (x+w, y+h), (255, 0, 0), 20)
+    f, axarr = plt.subplots(2)
+    axarr[0].imshow(gray_im)
+    axarr[1].imshow(cropped_im)
+    plt.show()
+  """
   return cropped_im
 
+# Crops margin1 and margin2 from both width and height.
 def crop_margin(image, margin1, margin2):
   return image[margin1:image.shape[0]-margin2, margin1:image.shape[1]-margin2]
 
@@ -135,7 +230,9 @@ def crop_composition_images(input_dir, output_dir):
       continue
     im = None
     try:
-      im = plt.imread(f)
+      # It's important to use skio.imread here instead of plt.imread since the plt version
+      # doesn't always properly account for orientation of pictures.
+      im = skio.imread(f)
     except Exception as e:
       print("\nIgnoring: "+str(f)+" due to "+str(e))
       continue
@@ -160,7 +257,7 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
 
   # Resize the mosaic image so that the composition images fit evenly by pixels
   composition_length = comp_size[0]
-  mosaic_im = plt.imread(mosaic_file)
+  mosaic_im = skio.imread(mosaic_file)
   mosaic_cropped = crop_to_square(mosaic_im)
   if not mosaic_cropped.shape[0]%composition_length == 0:
     margin = (mosaic_cropped.shape[0]%composition_length)//2
@@ -177,7 +274,7 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
   # TODO: parallelize
   sidelength = mosaic_cropped.shape[0]/composition_length
   for x in range(1,num_im+1):
-    im = plt.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))
+    im = skio.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))
     resized = transform.resize(im, (sidelength,sidelength,3))
     write_image_to_file(resized, output_dir, x)
     print_update("Finished resizing "+str(x)+" image(s).")
@@ -213,7 +310,7 @@ def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, 
   def determine_greedy_index_order():
     # Convert mosaic to greyscale for blurring and edge detection (dowsized for ease)
     grey = np.mean(mosaic_im, axis=2)
-    small = transform.rescale(grey, min([1, 255./grey.shape[0]])) # downsizes to reoughly 255 pixels
+    small = transform.rescale(grey, min([1, 255./grey.shape[0]])) # downsizes to roughly 255 pixels
     small_smoothed = convolve2d(small, gaussian2d(), "same")
     high_freq = transform.resize(small-small_smoothed, grey.shape)*255.
     # returns the index-sorted inverse of the sum of high_freq values per composition image
@@ -232,7 +329,7 @@ def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, 
       im = skio.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))/255.
       composition_images[x] = transform.resize(im, (sl,sl,3))
 
-    # determines which composition image corresponds to each part of the mosaic image 
+    # determines which composition image corresponds to each part of the mosaic image
     comp_order = np.zeros(comp_width*comp_height)
     for i in determine_greedy_index_order():
       mosaic_slice = featurized_mosaic_im[:,sl*i:sl*(i+1)]
@@ -275,7 +372,7 @@ def do_step(func, start_step, *args):
 def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mosaic_image):
   # Step 0: Crop composition images.
   do_step(crop_composition_images, start_step, input_images_dir, _cropped)
-  # Step 1: Resize images
+  # Step 1: Resize images.
   resized_mosaic_file = os.path.splitext(mosaic_image)[0]+"_resized.jpg"
   do_step(resize_all, start_step, _cropped, _resized, mosaic_image, resized_mosaic_file, _comp_size)
   # Step 2: Arrange composition photos
@@ -285,7 +382,62 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
 
 if __name__ == "__main__":
-  create_mosaic(start_step=2)
+  create_mosaic(start_step=0)
+
+  #im = skio.imread(os.path.join(_images_dir, 'test.jpg'))/255.
+  #featurized = featurize(im, 5)
+  #print(np.argsort(list(map(lambda x: 1./np.sum(x), np.hsplit(featurize(im, 5), 5*5)))))
+  #test_im(featurized)
+
+  # im = skio.imread(os.path.join(_images_dir, '20220410_125416.jpg'))
+  #test_im(im)
+  #cropped_im = crop_to_square(im)
+  #test_im(cropped_im, "elk_center_cropped")
+
+
+
+  # im = cv2.imread(os.path.join(_images_dir, 'PXL_20220918_170511961.jpg'))
+  #im = cv2.imread(os.path.join(_images_dir, '20230917_150408.jpg'))
+  # im = cv2.imread(os.path.join(_images_dir, 'PXL_20221120_192744494.MP.jpg'))
+  #im = cv2.imread(os.path.join(_images_dir, 'PXL_20230704_203822984.jpg'))
+  #im = cv2.imread(os.path.join(_images_dir, 'DSC_9421.jpg'))
+  #im = cv2.imread(os.path.join(_images_dir, '_DSC8811.jpg'))
+
+  #im = skio.imread(os.path.join(_images_dir, 'PXL_20221120_192744494.MP.jpg'))
+  #crop_to_square(im)
+  #test_im(crop_to_square(im))
+
+"""
+  # Face detection
+  gray_im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+  faces = _face_cascade.detectMultiScale(gray_im, 1.1, 6, minSize=(200,200))
+  print(str(len(faces)) + " faces detected.")
+  eyes = ()
+  # Draw rectangle around the faces
+  for (x, y, w, h) in faces:
+      print("face size in pixels: " + str(w) + "," + str(w))
+      cv2.rectangle(im, (x, y), (x+w, y+h), (255, 0, 0), 2)
+      
+      # Detect and draw eyes within the face box
+      gray_roi = gray_im[y:y+h, x:x+w]
+      color_roi = im[y:y+h, x:x+w]
+      eye_detections = _eye_cascade.detectMultiScale(gray_roi, 1.1, 10)
+      if len(eye_detections):
+        if len(eyes):
+          eyes = np.vstack((eyes, eye_detections))
+        else:
+          eyes = eye_detections
+        print(eyes)
+  eye_detections = _eye_cascade.detectMultiScale(gray_im, 1.1, 10)
+  for (ex,ey,ew,eh) in eyes:
+    cv2.rectangle(im,(ex,ey),(ex+ew,ey+eh),(0,255,0),2)
+
+  # Display the output
+  # cv2.imshow('face detections', cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
+  cv2.imshow('face detections', im)
+  cv2.waitKey()
+"""
+
 
 
 

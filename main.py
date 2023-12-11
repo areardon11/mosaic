@@ -16,20 +16,22 @@ plt.rcParams['image.cmap'] = 'gray'
 # User Modifyable Constants
 ###########################################
 
+# Used to specify which step to start with. Default should remain at 0 for the entire mosaic process to occur.
+_start_step = 2
+
 # input defaults, necessary for step 0
 _images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/lauren/")
 _input_images = os.path.join(_images_dir, "input_images/")
-_mosaic_image = os.path.join(_images_dir, "PXL_20220918_170511961.jpg")
 # value to bias toward center cropping, necessary for step 0.
 _center_crop_bias_face = 1.05
 _center_crop_bias_saliency = 1.3
 
-# Necesary starting at step 1
-_mosaic_image_scale_factor = 2  # Affects total pixel count of final creation.
-
-# Necessary starting at step 2
-# Tuple containing the number of composition images that make up the width by the number of images that create the height
-_comp_size = (20, 20)
+# Mosaic composition info. Necessary starting at step 1.
+_mosaic_image = os.path.join(_images_dir, "_DSC9430-Pano.jpg")
+#_mosaic_image = os.path.join(_images_dir, "PXL_20220918_170511961.jpg")
+_mosaic_image_scale_factor = 1  # Affects total pixel count of final creation.
+# Tuple containing the number of composition images that make up the height by the number of images that create the width
+_comp_size = (10, 30)
 
 # Necessary starting at step 3
 _alpha_combining_factor = .5 # Ratio of the final product that should be the mosaic.
@@ -102,10 +104,10 @@ def clamp_val(val, range):
 
 def test_im(im, save=''):
   print(im.shape)
-  plt.imshow(im)
+  plt.imshow(im, vmin=0, vmax=1)
   plt.show()
   if save:
-    plt.imsave(os.path.join(_images_dir, save+'.jpg'), im)
+    plt.imsave(os.path.join(_images_dir, save+'.jpg'), im, vmin=0, vmax=1)
   return im
 
 ###########################################
@@ -118,6 +120,22 @@ def center_crop(im):
   if not num_row_remove%2==0:
     im = im[:-1,:]
   crop_size = num_row_remove//2
+  return im[crop_size:im.shape[0]-crop_size]
+
+# Generalized center_crop. Removes num_lines from a single axis.
+def center_crop_along_axis(im, num_lines, axis):
+  assert im.shape[axis] > num_lines, "Cannot remove more lines than exist from the specified axis"
+  assert axis in [0,1], "The axis input should be valid [0,1]"
+  if num_lines <= 0:
+    return im
+  if not num_lines%2==0:
+    if axis:
+      im = im[:,:-1]
+    else:
+      im = im[:-1]
+  crop_size = num_lines//2
+  if axis:
+    return im[:,crop_size:im.shape[1]-crop_size]
   return im[crop_size:im.shape[0]-crop_size]
 
 # Crop out the top.
@@ -133,11 +151,8 @@ def bot_crop(im):
 def choose_crop_type_max_saliency(saliency_map):
   total_saliency = np.sum(saliency_map)
   score_to_crop_type_dict = {}
-  # test_im(center_crop(image))
   score_to_crop_type_dict[np.sum(center_crop(saliency_map))*_center_crop_bias_saliency/total_saliency] = center_crop
-  # test_im(top_crop(image))
   score_to_crop_type_dict[np.sum(top_crop(saliency_map))/total_saliency] = top_crop
-  # test_im(bot_crop(image))
   score_to_crop_type_dict[np.sum(bot_crop(saliency_map))/total_saliency] = bot_crop
   print(score_to_crop_type_dict)
   return score_to_crop_type_dict[max(score_to_crop_type_dict)]
@@ -215,9 +230,8 @@ def crop_to_square(image):
   """
   return cropped_im
 
-# Crops margin1 and margin2 from both width and height.
-def crop_margin(image, margin1, margin2):
-  return image[margin1:image.shape[0]-margin2, margin1:image.shape[1]-margin2]
+def crop_margin(image, margin1, margin2, margin3, margin4):
+  return image[margin1:image.shape[0]-margin2, margin3:image.shape[1]-margin4]
 
 def crop_composition_images(input_dir, output_dir):
   ensure_dir(output_dir)
@@ -254,25 +268,54 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
   ensure_dir(output_dir)
   min_dim = read_int_from_file(_min_dim_filepath)
   num_im = read_int_from_file(_num_images_filepath)
-
-  # Resize the mosaic image so that the composition images fit evenly by pixels
-  composition_length = comp_size[0]
+  composition_height = comp_size[0]
+  composition_width = comp_size[1]
   mosaic_im = skio.imread(mosaic_file)
-  mosaic_cropped = crop_to_square(mosaic_im)
-  if not mosaic_cropped.shape[0]%composition_length == 0:
-    margin = (mosaic_cropped.shape[0]%composition_length)//2
-    mod = (mosaic_cropped.shape[0]%composition_length)%2
-    mosaic_cropped = crop_margin(mosaic_cropped, margin, margin+mod)
+
+  # Resize the mosaic image so that the composition images fit evenly by pixels.
+  if composition_width == composition_height:
+    mosaic_im = crop_to_square(mosaic_im)
+    if not mosaic_im.shape[0]%composition_height == 0:
+      margin = (mosaic_im.shape[0]%composition_height)//2
+      mod = (mosaic_im.shape[0]%composition_height)%2
+      mosaic_im = crop_margin(mosaic_im, margin, margin+mod, margin, margin+mod)
+  else:
+    # First make the mosaic image match the composition ratio.
+    smaller_axis = np.argmin(mosaic_im.shape[:-1])
+    larger_axis = int(not smaller_axis)
+    assert ((composition_height > composition_width) == bool(smaller_axis)), "Messed up the _comp_size based on the mosaic resolution. Try swapping the values."
+    desired_resolution_ratio = comp_size[larger_axis]/comp_size[smaller_axis]
+    axis_too_large = larger_axis if mosaic_im.shape[larger_axis]/mosaic_im.shape[smaller_axis] > desired_resolution_ratio else smaller_axis
+    print(axis_too_large)
+    num_remove_lines = int(mosaic_im.shape[larger_axis]-(mosaic_im.shape[smaller_axis]*desired_resolution_ratio))
+    if num_remove_lines < 0:
+      off_axis_remove_lines = abs(num_remove_lines)%desired_resolution_ratio
+      mosaic_im = center_crop_along_axis(mosaic_im, off_axis_remove_lines, int(not axis_too_large))
+      num_remove_lines = math.ceil(abs(num_remove_lines)/desired_resolution_ratio)
+    test_im(mosaic_im)
+    print(axis_too_large)
+    mosaic_im = center_crop_along_axis(mosaic_im, num_remove_lines, axis_too_large)
+    test_im(mosaic_im)
+    print(comp_size[0]/comp_size[1])
+    assert mosaic_im.shape[0]/mosaic_im.shape[1] == comp_size[0]/comp_size[1], "Dimensions of the cropped mosaic don't match the composition"
+    # Now the mosaic image matches the composition ratio, ensure that it fits the compositions evenly by pixels.
+    height_margin = (mosaic_im.shape[0]%composition_height)//2
+    height_mod = (mosaic_im.shape[0]%composition_height)%2
+    width_margin = (mosaic_im.shape[1]%composition_width)//2
+    width_mod = (mosaic_im.shape[1]%composition_width)%2
+    mosaic_im = crop_margin(mosaic_im, height_margin, height_margin+height_mod, width_margin, width_margin+width_mod)
+
+
   # Apply scale factor to mosaic image
-  mosaic_cropped = transform.rescale(mosaic_cropped, (_mosaic_image_scale_factor, _mosaic_image_scale_factor, 1))
-  if mosaic_cropped.shape[0]/composition_length > min_dim:
+  mosaic_im = transform.rescale(mosaic_im, (_mosaic_image_scale_factor, _mosaic_image_scale_factor, 1))
+  if mosaic_im.shape[0]/composition_height > min_dim or mosaic_im.shape[1]/composition_width > min_dim:
     raise("Error!!! Not expected to have a mosaic image this large in comparison to the composition images")
     return
-  plt.imsave(mosaic_resized_file, mosaic_cropped)
+  plt.imsave(mosaic_resized_file, mosaic_im)
 
   # Resize the composition_images
   # TODO: parallelize
-  sidelength = mosaic_cropped.shape[0]/composition_length
+  sidelength = mosaic_im.shape[0]/composition_height
   for x in range(1,num_im+1):
     im = skio.imread(os.path.join(input_dir,"image_"+str(x).zfill(4)+".jpg"))
     resized = transform.resize(im, (sidelength,sidelength,3))
@@ -297,13 +340,13 @@ def evaluation_function(im1,im2):
 def featurize(im, comp_height):
   return np.hstack(np.vsplit(im, comp_height))
 
-def defeaturize(im, comp_width):
-  return np.vstack(np.hsplit(im, comp_width))
+def defeaturize(im, comp_height):
+  return np.vstack(np.hsplit(im, comp_height))
 
-def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, comp_size):
+def arrange_composition_photos(mosaic_file, input_dir, output_arrangement_file, comp_size):
   num_im = read_int_from_file(_num_images_filepath)
-  comp_width = comp_size[0]
-  comp_height = comp_size[1]
+  comp_height = comp_size[0]
+  comp_width = comp_size[1]
   mosaic_im = skio.imread(mosaic_file)/255.
 
   # Returns a list of indices in the order that they should be greedily applied to the composition
@@ -341,7 +384,7 @@ def arrange_composition_photos(mosaic_file, input_dir, output_composition_file, 
 
   order = determine_greedy_comp_photo_order()
   combined = np.hstack(np.array(list(map(lambda x: skio.imread(os.path.join(input_dir,"image_"+str(int(x)).zfill(4)+".jpg"))/255., order))))
-  plt.imsave(output_composition_file, defeaturize(combined, comp_width))
+  plt.imsave(output_arrangement_file, defeaturize(combined, comp_height))
 
 ###########################################
 # Combining
@@ -382,7 +425,7 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
 
 if __name__ == "__main__":
-  create_mosaic(start_step=0)
+  create_mosaic(start_step=_start_step)
 
   #im = skio.imread(os.path.join(_images_dir, 'test.jpg'))/255.
   #featurized = featurize(im, 5)
@@ -399,13 +442,18 @@ if __name__ == "__main__":
   # im = cv2.imread(os.path.join(_images_dir, 'PXL_20220918_170511961.jpg'))
   #im = cv2.imread(os.path.join(_images_dir, '20230917_150408.jpg'))
   # im = cv2.imread(os.path.join(_images_dir, 'PXL_20221120_192744494.MP.jpg'))
-  #im = cv2.imread(os.path.join(_images_dir, 'PXL_20230704_203822984.jpg'))
+  # im = cv2.imread(os.path.join(_images_dir, 'PXL_20230704_203822984.jpg'))
   #im = cv2.imread(os.path.join(_images_dir, 'DSC_9421.jpg'))
   #im = cv2.imread(os.path.join(_images_dir, '_DSC8811.jpg'))
 
-  #im = skio.imread(os.path.join(_images_dir, 'PXL_20221120_192744494.MP.jpg'))
-  #crop_to_square(im)
-  #test_im(crop_to_square(im))
+  # im = skio.imread(os.path.join(_images_dir, '_DSC9430-Pano_resized.jpg'))
+  #gray_im = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
+  #faces = _face_cascade.detectMultiScale(gray_im, 1.05, 11, minSize=(250,250))
+  #for (x, y, w, h) in faces:
+      #cv2.rectangle(im, (x, y), (x+w, y+h), (255, 0, 0), 15)
+  #test_im(crop_to_square(im), 'waterfall_final_crop')
+  # crop_to_square(im)
+  #test_im(featurize(im, 10), 'test_featurize')
 
 """
   # Face detection

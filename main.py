@@ -17,23 +17,23 @@ plt.rcParams['image.cmap'] = 'gray'
 ###########################################
 
 # Used to specify which step to start with. Default should remain at 0 for the entire mosaic process to occur.
-_start_step = 2
+_start_step = 0
 
 # input defaults, necessary for step 0
-_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/lauren/")
-_input_images = os.path.join(_images_dir, "input_images/")
+_images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/family/")
+_input_images = os.path.join(_images_dir, "input/")
 # value to bias toward center cropping, necessary for step 0.
 _center_crop_bias_face = 1.05
 _center_crop_bias_saliency = 1.3
 
 # Mosaic composition info. Necessary starting at step 1.
-_mosaic_image = os.path.join(_images_dir, "_DSC9430-Pano.jpg")
-#_mosaic_image = os.path.join(_images_dir, "PXL_20220918_170511961.jpg")
-_mosaic_image_scale_factor = 1  # Affects total pixel count of final creation.
+_mosaic_image = os.path.join(_images_dir, "PXL_20231223_233426799.jpg")
+_mosaic_image_scale_factor = 2  # Affects total pixel count of final creation.
 # Tuple containing the number of composition images that make up the height by the number of images that create the width
-_comp_size = (10, 30)
+_comp_size = (24, 32)
 
 # Necessary starting at step 3
+_gaussian_filter_scale = 1./51. # Scale (wrt resolution sidelength) of the filter used for sharpening composition arrangement and smoothing the reference mosaic image.
 _alpha_combining_factor = .5 # Ratio of the final product that should be the mosaic.
 
 ###########################################
@@ -42,7 +42,7 @@ _alpha_combining_factor = .5 # Ratio of the final product that should be the mos
 
 _min_dim_filepath = os.path.join(_images_dir, ".min_dimension") # Smallest sidelength of composition photo
 _num_images_filepath = os.path.join(_images_dir, ".num_images") # Total number of composition images
-_whitelisted_extensions = (".jpg", ".png")
+_whitelisted_extensions = (".jpg", ".png", ".heic")
 _cropped = os.path.join(_images_dir, "cropped")
 _resized = os.path.join(_images_dir, "resized")
 
@@ -67,7 +67,7 @@ def ensure_dir(directory):
     os.mkdir(directory)
 
 def has_whitelisted_extension(filename):
-  return any(map(lambda x: x in os.path.splitext(filename)[-1], _whitelisted_extensions))
+  return any(map(lambda x: x in (os.path.splitext(filename)[-1]).lower(), _whitelisted_extensions))
 
 def write_image_to_file(image, output_dir, num):
   plt.imsave(os.path.join(output_dir,"image_"+str(num).zfill(4)+".jpg"), image)
@@ -154,7 +154,6 @@ def choose_crop_type_max_saliency(saliency_map):
   score_to_crop_type_dict[np.sum(center_crop(saliency_map))*_center_crop_bias_saliency/total_saliency] = center_crop
   score_to_crop_type_dict[np.sum(top_crop(saliency_map))/total_saliency] = top_crop
   score_to_crop_type_dict[np.sum(bot_crop(saliency_map))/total_saliency] = bot_crop
-  print(score_to_crop_type_dict)
   return score_to_crop_type_dict[max(score_to_crop_type_dict)]
 
 def compute_face_area_within_height_range(faces, height_range, transposed):
@@ -186,7 +185,6 @@ def choose_crop_type_max_face_area(im, faces, transposed):
   score_to_crop_type_dict[center_face_area*_center_crop_bias_face/total_face_area] = center_crop
   score_to_crop_type_dict[compute_face_area_within_height_range(faces, (im.shape[0]-im.shape[1], im.shape[0]), transposed)/total_face_area] = top_crop
   score_to_crop_type_dict[compute_face_area_within_height_range(faces, (0, im.shape[1]), transposed)/total_face_area] = bot_crop
-  print(score_to_crop_type_dict)
   return score_to_crop_type_dict[max(score_to_crop_type_dict)]
 
 def crop_to_square(image):
@@ -286,25 +284,19 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
     assert ((composition_height > composition_width) == bool(smaller_axis)), "Messed up the _comp_size based on the mosaic resolution. Try swapping the values."
     desired_resolution_ratio = comp_size[larger_axis]/comp_size[smaller_axis]
     axis_too_large = larger_axis if mosaic_im.shape[larger_axis]/mosaic_im.shape[smaller_axis] > desired_resolution_ratio else smaller_axis
-    print(axis_too_large)
     num_remove_lines = int(mosaic_im.shape[larger_axis]-(mosaic_im.shape[smaller_axis]*desired_resolution_ratio))
     if num_remove_lines < 0:
       off_axis_remove_lines = abs(num_remove_lines)%desired_resolution_ratio
       mosaic_im = center_crop_along_axis(mosaic_im, off_axis_remove_lines, int(not axis_too_large))
       num_remove_lines = math.ceil(abs(num_remove_lines)/desired_resolution_ratio)
-    test_im(mosaic_im)
-    print(axis_too_large)
     mosaic_im = center_crop_along_axis(mosaic_im, num_remove_lines, axis_too_large)
-    test_im(mosaic_im)
-    print(comp_size[0]/comp_size[1])
-    assert mosaic_im.shape[0]/mosaic_im.shape[1] == comp_size[0]/comp_size[1], "Dimensions of the cropped mosaic don't match the composition"
+    assert math.isclose(mosaic_im.shape[0]/mosaic_im.shape[1], comp_size[0]/comp_size[1], rel_tol=1e-3), "Dimensions of the cropped mosaic " + str(mosaic_im.shape) + " don't match the composition"
     # Now the mosaic image matches the composition ratio, ensure that it fits the compositions evenly by pixels.
     height_margin = (mosaic_im.shape[0]%composition_height)//2
     height_mod = (mosaic_im.shape[0]%composition_height)%2
     width_margin = (mosaic_im.shape[1]%composition_width)//2
     width_mod = (mosaic_im.shape[1]%composition_width)%2
     mosaic_im = crop_margin(mosaic_im, height_margin, height_margin+height_mod, width_margin, width_margin+width_mod)
-
 
   # Apply scale factor to mosaic image
   mosaic_im = transform.rescale(mosaic_im, (_mosaic_image_scale_factor, _mosaic_image_scale_factor, 1))
@@ -394,10 +386,40 @@ def combine_images(im1, im2, alpha=_alpha_combining_factor):
   assert(alpha >= 0 and alpha <= 1)
   return np.clip((im1*alpha)+(im2*(1-alpha)),0,1)
 
-def combine_mosaic(mosaic_file, input_composition_file, output_file):
-  mosaic_im = combine_images(skio.imread(mosaic_file)/255., skio.imread(input_composition_file)/255.)
-  plt.imsave(output_file, mosaic_im)
+def tint_arrangement(arrangement_im, mosaic_im, comp_size):
+  def get_median_color(im):
+    return np.median(np.median(im, axis=0), axis=0)
+  comp_height = comp_size[0]
+  comp_width = comp_size[1]
+  featurized_tinted = featurize(arrangement_im, comp_height)
+  featurized_mosaic_im = featurize(mosaic_im, comp_height)
+  sl = featurized_mosaic_im.shape[0]
+  column = 0
+  while column < featurized_mosaic_im.shape[1]:
+    c = get_median_color(featurized_mosaic_im[:,column:column+sl])
+    featurized_tinted[:,column:column+sl] = combine_images(featurized_tinted[:,column:column+sl], np.full((sl,sl,3), get_median_color(featurized_mosaic_im[:,column:column+sl])), alpha=.5)
+    column += sl
+  return defeaturize(featurized_tinted, comp_height)
 
+def combine_mosaic(input_composition_filename, reference_mosaic_filename, comp_size, tint_filename, output_filename):
+  arrangement_im = skio.imread(input_composition_filename)/255.
+  mosaic_im = skio.imread(reference_mosaic_filename)/255.
+  assert(arrangement_im.shape == mosaic_im.shape)
+  # Tint the composition arrangement and sharpen it.
+  tinted = tint_arrangement(arrangement_im, mosaic_im, comp_size)
+  gaussian_sidelength = int(min(mosaic_im.shape[:-1])*_gaussian_filter_scale)
+  if gaussian_sidelength % 2 != 1:
+    gaussian_sidelength += 1
+  tinted_smoothed = cv2.GaussianBlur(tinted, (gaussian_sidelength,gaussian_sidelength), gaussian_sidelength*5*_gaussian_filter_scale)
+  tinted_sharpened = np.clip(tinted + (tinted - tinted_smoothed),0,1)
+  plt.imsave(tint_filename, tinted_sharpened)
+  # Take low frequency of the mosaic reference image, then combine with arrangement.
+  gaussian_sidelength = int(min(mosaic_im.shape[:-1])*_gaussian_filter_scale)
+  if gaussian_sidelength % 2 != 1:
+    gaussian_sidelength += 1
+  reference_smoothed = cv2.GaussianBlur(mosaic_im, (gaussian_sidelength,gaussian_sidelength), gaussian_sidelength*5*_gaussian_filter_scale)
+  mosaic_im = combine_images(reference_smoothed, tinted_sharpened, alpha=.5)
+  plt.imsave(output_filename, mosaic_im)
 
 ###########################################
 # Executing
@@ -418,14 +440,19 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   # Step 1: Resize images.
   resized_mosaic_file = os.path.splitext(mosaic_image)[0]+"_resized.jpg"
   do_step(resize_all, start_step, _cropped, _resized, mosaic_image, resized_mosaic_file, _comp_size)
-  # Step 2: Arrange composition photos
+  # Step 2: Arrange composition photos.
   arranged_file = os.path.splitext(mosaic_image)[0]+"_arranged.jpg"
   do_step(arrange_composition_photos, start_step, resized_mosaic_file, _resized, arranged_file, _comp_size)
-  # Step 3: Combine mosaic and composition photos
-  do_step(combine_mosaic, start_step, resized_mosaic_file, arranged_file, os.path.splitext(mosaic_image)[0]+"_composition.jpg")
+  # Step 3: Combine mosaic and composition photos.
+  tinted_filename = os.path.splitext(mosaic_image)[0]+"_tinted.jpg"
+  mosaic_filename = os.path.splitext(mosaic_image)[0]+"_composition.jpg"
+  do_step(combine_mosaic, start_step, arranged_file, resized_mosaic_file, _comp_size, tinted_filename, mosaic_filename)
+  print("Done! Final output file located at " + mosaic_filename)
 
 if __name__ == "__main__":
   create_mosaic(start_step=_start_step)
+
+  # test_im(np.full((682,512,3), (1.,1.,0)))
 
   #im = skio.imread(os.path.join(_images_dir, 'test.jpg'))/255.
   #featurized = featurize(im, 5)
@@ -446,7 +473,8 @@ if __name__ == "__main__":
   #im = cv2.imread(os.path.join(_images_dir, 'DSC_9421.jpg'))
   #im = cv2.imread(os.path.join(_images_dir, '_DSC8811.jpg'))
 
-  # im = skio.imread(os.path.join(_images_dir, '_DSC9430-Pano_resized.jpg'))
+  im = skio.imread(os.path.join('~/Downloads/family2', 'IMG_0620.HEIC'))
+  test_im(im)
   #gray_im = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
   #faces = _face_cascade.detectMultiScale(gray_im, 1.05, 11, minSize=(250,250))
   #for (x, y, w, h) in faces:

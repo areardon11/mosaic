@@ -17,7 +17,7 @@ plt.rcParams['image.cmap'] = 'gray'
 ###########################################
 
 # Used to specify which step to start with. Default should remain at 0 for the entire mosaic process to occur.
-_start_step = 0
+_start_step = 3
 
 # input defaults, necessary for step 0
 _images_dir = os.path.join(os.path.expanduser("~"), "programming/comp_photo/mosaic/family/")
@@ -56,6 +56,7 @@ _mutable_step_count = 0
 _saliency = cv2.saliency.StaticSaliencySpectralResidual_create()
 _saliency_fine = cv2.saliency.StaticSaliencyFineGrained_create()
 _face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+_min_face_size_ratio = 1./16.
 _eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
 ###########################################
@@ -316,14 +317,22 @@ def resize_all(input_dir, output_dir, mosaic_file, mosaic_resized_file, comp_siz
   print_update_end()
 
 ###########################################
-# Determine Mosaic Composition
+# Determine Mosaic Composition Arrangement
 ###########################################
 
 def gaussian2d(shape=(5,5), sigma=.8):
+  assert len(shape) == 2
   m,n = [(ss-1.)/2. for ss in shape]
   x,y = np.ogrid[-m:m+1,-n:n+1]
   f = np.exp(-((x**2 + y**2)/(2.0*sigma**2)))
   return f/f.sum()
+
+def normalized_gaussian2d(shape=(5,5), sigma=.8):
+  assert len(shape) == 2
+  g = gaussian2d(shape, sigma)
+  max_val = g[shape[0]//2, shape[1]//2]
+  assert max_val <= 1
+  return g/max_val
 
 def evaluation_function(im1,im2):
   # TODO: Use a more in depth evaluation than SSD
@@ -386,6 +395,12 @@ def combine_images(im1, im2, alpha=_alpha_combining_factor):
   assert(alpha >= 0 and alpha <= 1)
   return np.clip((im1*alpha)+(im2*(1-alpha)),0,1)
 
+def combine_images_using_mask(im1, im2, mask):
+  assert im1.shape == im2.shape
+  assert im1.shape == mask.shape
+  return np.clip((im1*mask)+(im2*(1-mask)),0,1)
+
+
 def tint_arrangement(arrangement_im, mosaic_im, comp_size):
   def get_median_color(im):
     return np.median(np.median(im, axis=0), axis=0)
@@ -401,10 +416,22 @@ def tint_arrangement(arrangement_im, mosaic_im, comp_size):
     column += sl
   return defeaturize(featurized_tinted, comp_height)
 
-def combine_mosaic(input_composition_filename, reference_mosaic_filename, comp_size, tint_filename, output_filename):
+def compute_gaussian_face_mask(im):
+  assert len(im.shape) == 3
+  gray_im = cv2.cvtColor((im*255).astype('u1'), cv2.COLOR_RGB2GRAY)
+  output_mask = np.zeros(gray_im.shape)
+  min_face_size = int(max(gray_im.shape)*_min_face_size_ratio)
+  faces = _face_cascade.detectMultiScale(gray_im, 1.01, 25, minSize=(min_face_size,min_face_size))
+  for (x, y, w, h) in faces:
+    stacked = np.stack((output_mask[y:y+w, x:x+w], normalized_gaussian2d((w,h), max(w,h)//4)), axis=2)
+    output_mask[y:y+w, x:x+w] = np.max(stacked, axis=2)
+  return output_mask
+
+def combine_mosaic(input_composition_filename, reference_mosaic_filename, comp_size, tint_filename, smoothed_mosaic_ref_filename, output_filename):
   arrangement_im = skio.imread(input_composition_filename)/255.
   mosaic_im = skio.imread(reference_mosaic_filename)/255.
   assert(arrangement_im.shape == mosaic_im.shape)
+  mask = compute_gaussian_face_mask(mosaic_im)
   # Tint the composition arrangement and sharpen it.
   tinted = tint_arrangement(arrangement_im, mosaic_im, comp_size)
   gaussian_sidelength = int(min(mosaic_im.shape[:-1])*_gaussian_filter_scale)
@@ -413,11 +440,14 @@ def combine_mosaic(input_composition_filename, reference_mosaic_filename, comp_s
   tinted_smoothed = cv2.GaussianBlur(tinted, (gaussian_sidelength,gaussian_sidelength), gaussian_sidelength*5*_gaussian_filter_scale)
   tinted_sharpened = np.clip(tinted + (tinted - tinted_smoothed),0,1)
   plt.imsave(tint_filename, tinted_sharpened)
-  # Take low frequency of the mosaic reference image, then combine with arrangement.
+  # Take low frequency of the mosaic reference image (except for faces), then combine with arrangement.
+  mask = compute_gaussian_face_mask(mosaic_im)
   gaussian_sidelength = int(min(mosaic_im.shape[:-1])*_gaussian_filter_scale)
   if gaussian_sidelength % 2 != 1:
     gaussian_sidelength += 1
   reference_smoothed = cv2.GaussianBlur(mosaic_im, (gaussian_sidelength,gaussian_sidelength), gaussian_sidelength*5*_gaussian_filter_scale)
+  reference_smoothed = combine_images_using_mask(mosaic_im, reference_smoothed, np.dstack((mask, mask, mask)))
+  plt.imsave(smoothed_mosaic_ref_filename, reference_smoothed)
   mosaic_im = combine_images(reference_smoothed, tinted_sharpened, alpha=.5)
   plt.imsave(output_filename, mosaic_im)
 
@@ -445,12 +475,13 @@ def create_mosaic(start_step=0, input_images_dir=_input_images, mosaic_image=_mo
   do_step(arrange_composition_photos, start_step, resized_mosaic_file, _resized, arranged_file, _comp_size)
   # Step 3: Combine mosaic and composition photos.
   tinted_filename = os.path.splitext(mosaic_image)[0]+"_tinted.jpg"
+  smoothed_mosaic_ref_filename = os.path.splitext(mosaic_image)[0]+"_smoothed.jpg"
   mosaic_filename = os.path.splitext(mosaic_image)[0]+"_composition.jpg"
-  do_step(combine_mosaic, start_step, arranged_file, resized_mosaic_file, _comp_size, tinted_filename, mosaic_filename)
+  do_step(combine_mosaic, start_step, arranged_file, resized_mosaic_file, _comp_size, tinted_filename, smoothed_mosaic_ref_filename, mosaic_filename)
   print("Done! Final output file located at " + mosaic_filename)
 
 if __name__ == "__main__":
-  create_mosaic(start_step=_start_step)
+  create_mosaic(start_step=3)
 
   # test_im(np.full((682,512,3), (1.,1.,0)))
 
@@ -473,14 +504,24 @@ if __name__ == "__main__":
   #im = cv2.imread(os.path.join(_images_dir, 'DSC_9421.jpg'))
   #im = cv2.imread(os.path.join(_images_dir, '_DSC8811.jpg'))
 
-  im = skio.imread(os.path.join('~/Downloads/family2', 'IMG_0620.HEIC'))
-  test_im(im)
-  #gray_im = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
-  #faces = _face_cascade.detectMultiScale(gray_im, 1.05, 11, minSize=(250,250))
+  # test_im(normalized_gaussian2d((250,300), 100))
+  # test_im(normalized_gaussian2d(sigma=2))
+
+  im = skio.imread(os.path.join(_images_dir, 'PXL_20231223_233426799_resized.jpg'))
+  # im = skio.imread(os.path.join('~/programming/comp_photo/mosaic/lauren', 'PXL_20230501_123916777.PORTRAIT.jpg'))
+  # im[500:797,500:797] = np.zeros((297,297,3))
+  # test_im(im)
+  # test_im(compute_gaussian_face_mask(im), "selfie_good_mask")
+
+  gray_im = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
+  #min_face_size = int(max(gray_im.shape)*_min_face_size_ratio)
+  #faces = _face_cascade.detectMultiScale(gray_im, 1.01, 25, minSize=(min_face_size,min_face_size))
+  #print(len(faces))
   #for (x, y, w, h) in faces:
-      #cv2.rectangle(im, (x, y), (x+w, y+h), (255, 0, 0), 15)
-  #test_im(crop_to_square(im), 'waterfall_final_crop')
-  # crop_to_square(im)
+  #    cv2.rectangle(im, (x, y), (x+w, y+h), (255, 0, 0), 15)
+  #test_im(im)
+  # test_im(im, "family_faces")
+  #crop_to_square(im)
   #test_im(featurize(im, 10), 'test_featurize')
 
 """
